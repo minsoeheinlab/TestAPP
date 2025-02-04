@@ -1,0 +1,106 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  buildConfiguration: 'Release'  # Build configuration
+  azureSubscription: 'testappserviceconnection' # Azure service connection name
+  uatWebAppName: 'UATSampleWebAppService' # Azure Web App name for UAT
+  prodWebAppName: 'SampleWebAppService' # Azure Web App name for Production
+  resourceGroupName: 'minsoe-lab' # Shared Azure resource group name
+
+stages:
+# Stage 1: Build, Test, and CodeQL Analysis
+- stage: Build
+  displayName: 'Build and CodeQL Analysis'
+  jobs:
+  - job: BuildJob
+    displayName: 'Build and Analyze Source Code'
+    steps:
+    # Step 1: Checkout Repository from Azure Repos (Self)
+    - task: Checkout@1
+      displayName: 'Checkout Repository'
+
+    # Step 2: Log Variables for Debugging
+    - script: |
+        echo "Build Configuration: $(buildConfiguration)"
+        echo "Azure Subscription: $(azureSubscription)"
+        echo "UAT Web App Name: $(uatWebAppName)"
+        echo "Production Web App Name: $(prodWebAppName)"
+        echo "Resource Group Name: $(resourceGroupName)"
+        echo "Build Sources Directory: $(Build.SourcesDirectory)"
+      displayName: 'Log Variables'
+
+    # Step 3: Install .NET Core SDK
+    - task: UseDotNet@2
+      displayName: 'Use .NET Core SDK'
+      inputs:
+        packageType: 'sdk'
+        version: '8.0.100'
+
+    # Step 4: Build the Project
+    - script: |
+        echo "Building TestAPP-A"
+        dotnet build $(Build.SourcesDirectory)/TestAPP-A.sln --configuration $(buildConfiguration) --output $(Build.ArtifactStagingDirectory)
+      displayName: 'Build Application'
+
+    # Step 5: Initialize CodeQL
+    - task: AdvancedSecurity-Codeql-Init@1
+      displayName: 'Initialize CodeQL'
+      inputs:
+        languages: 'csharp'
+        buildCommands: "dotnet build $(Build.SourcesDirectory)/TestAPP-A.sln --configuration $(buildConfiguration)"
+        enableAutomaticCodeQLInstall: true
+
+    # Step 6: Run CodeQL Analysis
+    - task: AdvancedSecurity-Codeql-Analyze@1
+      displayName: 'Run CodeQL Analysis'
+
+# Stage 2: UAT Approval Gate
+- stage: Deploy_Approval
+  displayName: 'Approval for Deployment to UAT'
+  dependsOn: Build
+  jobs:
+  - deployment: UATApprovalGate
+    displayName: 'Approval Required for UAT'
+    environment: 'UAT'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - script: echo "Waiting for manual approval before UAT deployment"
+            displayName: 'Approval Step'
+
+# Stage 3: Production Deployment
+- stage: DeployProd
+  displayName: "Production Deployment Stage"
+  dependsOn: Deploy_Approval
+  condition: succeeded()
+  jobs:
+  - deployment: DeployToProd
+    displayName: "Deploy to Production"
+    environment: "Production"
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          # Step 1: Download Build Artifacts
+          - task: DownloadPipelineArtifact@2
+            displayName: 'Download Build Artifacts'
+            inputs:
+              artifact: 'drop'
+              path: $(Pipeline.Workspace)
+
+          # Step 2: Deploy to Azure Web App
+          - task: AzureWebApp@1
+            displayName: 'Deploy to Azure Web App (Production)'
+            inputs:
+              azureSubscription: $(azureSubscription)
+              appType: 'webApp'
+              appName: $(prodWebAppName)
+              resourceGroupName: $(resourceGroupName)
+              package: '$(Pipeline.Workspace)/drop/*.zip'
